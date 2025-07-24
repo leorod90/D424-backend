@@ -1,30 +1,33 @@
-const pool = require('./index.js');
+// setup.js
+const pool = require('./db');
 
 async function createTables() {
   try {
     await pool.query(`
-      CREATE TABLE profiles (
+      CREATE TABLE IF NOT EXISTS auth (
         id SERIAL PRIMARY KEY,
-        name VARCHAR(100) NOT NULL,
-        role VARCHAR(50) DEFAULT 'employee',
-        skills TEXT[] DEFAULT '{}',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      );
-    `);
-
-    await pool.query(`
-      CREATE TABLE auth (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(100) NOT NULL UNIQUE,
+        username VARCHAR(100) NOT NULL UNIQUE,
         password VARCHAR(100) NOT NULL
       );
     `);
 
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS profiles (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES auth(id),
+        name VARCHAR(100) NOT NULL,
+        role VARCHAR(50) DEFAULT 'employee',
+        skills TEXT[] DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
 
-    console.log('Tables created or already exist.');
+    console.log("Tables created successfully.");
+    process.exit();
   } catch (err) {
-    console.error('Error creating tables:', err);
+    console.error("Error creating tables:", err);
+    process.exit(1);
   }
 }
 
-module.exports = createTables;
+createTables();
