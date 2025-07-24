@@ -23,10 +23,8 @@ async function createTables() {
     `);
 
     console.log("Tables created successfully.");
-    process.exit();
   } catch (err) {
     console.error("Error creating tables:", err);
-    process.exit(1);
   }
 }
 
