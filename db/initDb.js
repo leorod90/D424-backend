@@ -1,5 +1,5 @@
 // setup.js
-const pool = require('./db');
+const pool = require('./index');
 
 async function createTables() {
   try {
