@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
+const createTables = require('./db/initDb');
 
 const corsOptions = {
   origin: [
@@ -16,10 +17,9 @@ app.use(cors(corsOptions));
 app.use(express.json());
 // db
 const pool = require('./db');
-const createTables = require('./db/initDb');
 
 async function startServer() {
-  // await createTables();
+  await createTables();
 
   // routes
   app.use('/api/auth', require('./routes/authRoutes'));
