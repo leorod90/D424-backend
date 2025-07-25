@@ -6,7 +6,7 @@ const createTables = require('./db/initDb');
 const corsOptions = {
   origin: [
     'http://localhost:5173', // dev
-    'https://d424-frontend.onrender.com/' // prod
+    'https://d424-frontend.onrender.com' // prod
   ],
   credentials: true,
 };
