@@ -160,8 +160,8 @@ router.get('/', async (req, res) => {
   }
 });
 
-// add/update skills for profile: PUT /api/profiles/skills/:profile_id
-router.put('/skills/:profile_id', async (req, res) => {
+// add/update skills for profile: PUT /api/profiles/:profile_id/skills
+router.put('/:profile_id/skills', async (req, res) => {
   const { profile_id } = req.params;
   const { skills } = req.body;
 
@@ -215,6 +215,69 @@ router.put('/skills/:profile_id', async (req, res) => {
   }
 });
 
+// get all available skills: GET /api/profiles/skills
+router.get('/skills', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM skills ORDER BY name ASC');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// add new skill: POST /api/profiles/skills
+router.post('/skills', async (req, res) => {
+  const { name } = req.body;
+
+  if (!name || !name.trim()) {
+    return res.status(400).json({ error: 'Skill name is required' });
+  }
+
+  try {
+    const result = await pool.query(
+      'INSERT INTO skills (name) VALUES ($1) RETURNING *',
+      [name.trim()]
+    );
+    
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    if (err.code === '23505') { // Unique constraint violation
+      res.status(409).json({ error: 'Skill already exists' });
+    } else {
+      res.status(500).json({ error: err.message });
+    }
+  }
+});
+
+// delete skill: DELETE /api/profiles/skills/:id
+router.delete('/skills/:id', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    // Check if skill is being used by any profiles
+    const usageCheck = await pool.query(
+      'SELECT COUNT(*) as count FROM profile_skills WHERE skill_id = $1',
+      [id]
+    );
+
+    if (parseInt(usageCheck.rows[0].count) > 0) {
+      return res.status(409).json({ 
+        error: 'Cannot delete skill because it is currently assigned to one or more profiles' 
+      });
+    }
+
+    const result = await pool.query('DELETE FROM skills WHERE id = $1 RETURNING *', [id]);
+    
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Skill not found' });
+    }
+
+    res.json({ message: 'Skill deleted successfully', deleted: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // search by skill: GET /api/profiles/search?skill=CSS
 router.get('/search', async (req, res) => {
   const { skill } = req.query;
@@ -260,16 +323,6 @@ router.get('/search', async (req, res) => {
     });
     
     res.json(enhancedResults);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// get all available skills: GET /api/profiles/skills
-router.get('/skills', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT * FROM skills ORDER BY name ASC');
-    res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

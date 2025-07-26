@@ -19,7 +19,7 @@ app.use(express.json());
 const pool = require('./db');
 
 async function startServer() {
-  await deleteAllTables();
+  // await deleteAllTables();
   await createTables();
 
   // routes
