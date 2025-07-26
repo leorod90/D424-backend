@@ -4,11 +4,68 @@ const pool = require('../db');
 const { ProfileFactory } = require('../models/Profile'); // Use the factory
 const verifyToken = require('../middleware/verifyToken');
 
+// Helper function to get or create skills
+async function getOrCreateSkills(skillNames) {
+  if (!Array.isArray(skillNames) || skillNames.length === 0) {
+    return [];
+  }
+
+  const skillIds = [];
+  
+  for (const skillName of skillNames) {
+    if (!skillName || skillName.trim() === '') continue;
+    
+    const trimmedSkill = skillName.trim();
+    
+    // Try to find existing skill
+    let result = await pool.query(
+      'SELECT id FROM skills WHERE LOWER(name) = LOWER($1)',
+      [trimmedSkill]
+    );
+    
+    if (result.rows.length > 0) {
+      skillIds.push(result.rows[0].id);
+    } else {
+      // Create new skill
+      result = await pool.query(
+        'INSERT INTO skills (name) VALUES ($1) RETURNING id',
+        [trimmedSkill]
+      );
+      skillIds.push(result.rows[0].id);
+    }
+  }
+  
+  return skillIds;
+}
+
+// Helper function to get profile with skills
+async function getProfileWithSkills(profileId) {
+  const profileResult = await pool.query(
+    'SELECT * FROM profiles WHERE id = $1',
+    [profileId]
+  );
+  
+  if (profileResult.rows.length === 0) {
+    return null;
+  }
+  
+  const skillsResult = await pool.query(`
+    SELECT s.name 
+    FROM skills s 
+    INNER JOIN profile_skills ps ON s.id = ps.skill_id 
+    WHERE ps.profile_id = $1
+  `, [profileId]);
+  
+  const profile = profileResult.rows[0];
+  profile.skills = skillsResult.rows.map(row => row.name);
+  
+  return profile;
+}
+
 // create profiles: POST /api/profiles
 router.post('/', verifyToken, async (req, res) => {
   const { name, role, skills, teamSize } = req.body;
   
-  // Now you can access req.userId from the token
   console.log('User creating profile:', req.userId);
 
   if (!name) {
@@ -18,30 +75,69 @@ router.post('/', verifyToken, async (req, res) => {
   const finalRole = role || 'employee';
   const finalSkills = Array.isArray(skills) ? skills : [];
 
+  const client = await pool.connect();
+  
   try {
-    const profile = ProfileFactory.createProfile(finalRole, name, finalSkills, teamSize);
+    await client.query('BEGIN');
     
-    const result = await pool.query(
-      'INSERT INTO profiles (name, role, skills) VALUES ($1, $2, $3) RETURNING *',
-      [name, finalRole, finalSkills]
+    // Create profile
+    const profileResult = await client.query(
+      'INSERT INTO profiles (name, role) VALUES ($1, $2) RETURNING *',
+      [name, finalRole]
     );
     
-    const savedProfile = result.rows[0];
+    const savedProfile = profileResult.rows[0];
+    
+    // Handle skills if provided
+    if (finalSkills.length > 0) {
+      const skillIds = await getOrCreateSkills(finalSkills);
+      
+      // Link skills to profile
+      for (const skillId of skillIds) {
+        await client.query(
+          'INSERT INTO profile_skills (profile_id, skill_id) VALUES ($1, $2)',
+          [savedProfile.id, skillId]
+        );
+      }
+    }
+    
+    await client.query('COMMIT');
+    
+    // Get the complete profile with skills for response
+    const completeProfile = await getProfileWithSkills(savedProfile.id);
+    const profile = ProfileFactory.createProfile(completeProfile.role, completeProfile.name, completeProfile.skills, teamSize);
     
     res.status(201).json({
-      ...savedProfile,
+      ...completeProfile,
       summary: profile.summary(),
       role_type: profile.getRole()
     });
   } catch (err) {
+    await client.query('ROLLBACK');
     res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 
 // get all profiles: GET /api/profiles
 router.get('/', async (req, res) => {
   try {
-    const result = await pool.query(`SELECT * FROM profiles`);
+    const result = await pool.query(`
+      SELECT 
+        p.*,
+        COALESCE(
+          json_agg(
+            CASE WHEN s.name IS NOT NULL THEN s.name ELSE NULL END
+          ) FILTER (WHERE s.name IS NOT NULL), 
+          '[]'
+        ) as skills
+      FROM profiles p
+      LEFT JOIN profile_skills ps ON p.id = ps.profile_id
+      LEFT JOIN skills s ON ps.skill_id = s.id
+      GROUP BY p.id, p.name, p.role, p.created_at
+      ORDER BY p.created_at DESC
+    `);
     
     // polymorphism (same method calls, different behavior)
     const enhancedProfiles = result.rows.map(profileData => {
@@ -64,49 +160,89 @@ router.get('/', async (req, res) => {
   }
 });
 
-// add skill to profile: PUT /api/profiles/skills/:profile_id
+// add/update skills for profile: PUT /api/profiles/skills/:profile_id
 router.put('/skills/:profile_id', async (req, res) => {
   const { profile_id } = req.params;
   const { skills } = req.body;
 
+  const client = await pool.connect();
+
   try {
-    const updatedSkills = Array.isArray(skills) ? skills : [];
-
-    const result = await pool.query(
-      'UPDATE profiles SET skills = $1 WHERE id = $2 RETURNING *',
-      [updatedSkills, profile_id]
-    );
-
-    if (result.rowCount === 0) {
+    await client.query('BEGIN');
+    
+    // Check if profile exists
+    const profileCheck = await client.query('SELECT id FROM profiles WHERE id = $1', [profile_id]);
+    if (profileCheck.rows.length === 0) {
       return res.status(404).json({ error: 'Profile not found' });
     }
 
-    // OOP for response
-    const profileData = result.rows[0];
+    // Remove all existing skills for this profile
+    await client.query('DELETE FROM profile_skills WHERE profile_id = $1', [profile_id]);
+
+    // Add new skills if provided
+    const updatedSkills = Array.isArray(skills) ? skills : [];
+    if (updatedSkills.length > 0) {
+      const skillIds = await getOrCreateSkills(updatedSkills);
+      
+      // Link new skills to profile
+      for (const skillId of skillIds) {
+        await client.query(
+          'INSERT INTO profile_skills (profile_id, skill_id) VALUES ($1, $2)',
+          [profile_id, skillId]
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+
+    // Get updated profile with skills for response
+    const completeProfile = await getProfileWithSkills(profile_id);
     const profile = ProfileFactory.createProfile(
-      profileData.role, 
-      profileData.name, 
-      profileData.skills
+      completeProfile.role, 
+      completeProfile.name, 
+      completeProfile.skills
     );
 
     res.status(200).json({
-      ...profileData,
+      ...completeProfile,
       summary: profile.summary()
     });
   } catch (err) {
+    await client.query('ROLLBACK');
     res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 
 // search by skill: GET /api/profiles/search?skill=CSS
 router.get('/search', async (req, res) => {
   const { skill } = req.query;
-  console.log("ASDSA", skill)
+  console.log("Searching for skill:", skill);
+  
   try {
-    const result = await pool.query(
-      'SELECT * FROM profiles WHERE $1 = ANY(skills)',
-      [skill]
-    );
+    const result = await pool.query(`
+      SELECT 
+        p.*,
+        COALESCE(
+          json_agg(
+            CASE WHEN s.name IS NOT NULL THEN s.name ELSE NULL END
+          ) FILTER (WHERE s.name IS NOT NULL), 
+          '[]'
+        ) as skills
+      FROM profiles p
+      LEFT JOIN profile_skills ps ON p.id = ps.profile_id
+      LEFT JOIN skills s ON ps.skill_id = s.id
+      WHERE p.id IN (
+        SELECT DISTINCT p2.id 
+        FROM profiles p2
+        INNER JOIN profile_skills ps2 ON p2.id = ps2.profile_id
+        INNER JOIN skills s2 ON ps2.skill_id = s2.id
+        WHERE LOWER(s2.name) = LOWER($1)
+      )
+      GROUP BY p.id, p.name, p.role, p.created_at
+      ORDER BY p.created_at DESC
+    `, [skill]);
     
     // Apply OOP enhancements to search results
     const enhancedResults = result.rows.map(profileData => {
@@ -129,89 +265,11 @@ router.get('/search', async (req, res) => {
   }
 });
 
-// get profile: GET /api/profiles/1
-router.get('/:id', async (req, res) => {
-  const { id } = req.params;
+// get all available skills: GET /api/profiles/skills
+router.get('/skills', async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT *
-      FROM profiles
-      WHERE id = $1
-    `, [id]);
-
-    const user = result.rows[0];
-    if (!user) return res.status(404).json({ error: 'Profile not found' });
-
-    // factory Pattern and polymorphism
-    const profile = ProfileFactory.createProfile(user.role, user.name, user.skills);
-    
-    res.json({
-      ...user,
-      summary: profile.summary(), // polymorphism - different behavior per class
-      role_type: profile.getRole() // polymorphism
-    });
-
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-
-// update profile: PUT /api/profiles/:id
-router.put('/:id', async (req, res) => {
-  const { name, role, skills } = req.body;
-  const { id } = req.params;
-
-  const updates = [];
-  const values = [];
-  let paramCount = 1;
-
-  if (name !== undefined) {
-    updates.push(`name = $${paramCount++}`);
-    values.push(name);
-  }
-
-  if (role !== undefined) {
-    updates.push(`role = $${paramCount++}`);
-    values.push(role);
-  }
-
-  if (skills !== undefined) {
-    if (!Array.isArray(skills)) {
-      return res.status(400).json({ error: 'Skills must be an array' });
-    }
-    updates.push(`skills = $${paramCount++}`);
-    values.push(skills);
-  }
-
-  if (updates.length === 0) {
-    return res.status(400).json({ error: 'No valid fields to update' });
-  }
-
-  values.push(id);
-
-  try {
-    const result = await pool.query(
-      `UPDATE profiles SET ${updates.join(', ')} WHERE id = $${paramCount} RETURNING *`,
-      values
-    );
-
-    if (result.rowCount === 0) {
-      return res.status(404).json({ error: 'Profile not found' });
-    }
-
-    // OOP for response
-    const profileData = result.rows[0];
-    const profile = ProfileFactory.createProfile(
-      profileData.role, 
-      profileData.name, 
-      profileData.skills
-    );
-
-    res.json({
-      ...profileData,
-      summary: profile.summary()
-    });
+    const result = await pool.query('SELECT * FROM skills ORDER BY name ASC');
+    res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -221,6 +279,7 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   const { id } = req.params;
   try {
+    // The CASCADE will automatically delete related profile_skills records
     const result = await pool.query('DELETE FROM profiles WHERE id = $1 RETURNING *', [id]);
     
     if (result.rowCount === 0) {
